@@ -1,6 +1,6 @@
-list_of_feathers <- list.files(path = 'data', pattern="*")
+list_of_feathers <- list.files(path = 'data_far', pattern="*")
 
-complete_data <- lapply(paste0('data/', list_of_feathers), read_feather) %>% 
+complete_data <- lapply(paste0('data_far/', list_of_feathers), read_feather) %>% 
   reduce(rbind) %>% 
   data.table()
 
@@ -31,7 +31,7 @@ test <- tr_te %>%
   data.table()
 
 train <- tr_te %>%
-  filter(year(date) == 2015 | year(date) == 2016) %>%
+  filter(year(date) < 2016) %>%
   filter(firm %in% tr_tickers) %>%
   select(-date, -firm) %>%
   data.table()
@@ -121,3 +121,4 @@ today_test$pred <- xgb_model %>% predict(today_xgb)
 today_test %>% 
   select(firm, pred) %>% 
   arrange(desc(pred))
+

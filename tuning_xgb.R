@@ -3,7 +3,7 @@ tune_xgb <- function(train_data, target_label, ntrees = 100, objective = "binary
   train_data <- as.data.frame(train_data)
   
   # Count Event Rate
-  if(objective == "binary:logistic") event_rate <- ceiling(1/(sum(train_data$target == 1)/length(train_data$target)))
+  if(objective == "binary:logistic") event_rate <- ceiling(1/(sum(train_data$target == 1, na.rm = TRUE)/length(train_data$target)))
   if(!(objective == "binary:logistic")) event_rate <-  10
   if(fast){
     parameterList <- expand.grid(subsample = seq(from = 1, to = 1, by = 1),

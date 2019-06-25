@@ -5,6 +5,7 @@ library(rvest)
 library(progress)
 library(lubridate)
 library(BatchGetSymbols)
+library(feather)
 
 source("get_financials.R")
 source("get_tickers.R")
