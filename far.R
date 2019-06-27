@@ -5,8 +5,14 @@
 library(zoo)
 library(feather)
 library(tidyverse)
-library(lubridate)
 require(data.table)
+library(quantmod)
+library(rvest)
+library(progress)
+library(lubridate)
+library(BatchGetSymbols)
+library(feather)
+
 
 financial_path <- paste0(getwd(),"/data_far/data/")
 prices_path    <- paste0(getwd(),"/data_far/prices/")
@@ -263,13 +269,13 @@ tr_te <- ds %>%
   data.table()
 
 train <- tr_te %>%
-  filter(year(ymd(date)) < 2013) %>%
+  filter(year(ymd(date)) < 2015) %>%
   filter(name %in% tr_tickers) %>%
   select(-date, -name) %>%
   data.table()
 
 test <- tr_te %>%
-  filter(year(date) %in% c(2014)) %>%
+  filter(year(date) %in% c(2015)) %>%
   filter(!(name %in% tr_tickers)) %>%
   select(-date, -name) %>%
   data.table()
@@ -315,10 +321,10 @@ p <- list(objective = "binary:logistic",
           colsample_bylevel = 0.632,
           alpha = 0.01,
           lambda = 0.01,
-          nrounds = ntrees)
+          nrounds = 1e3)
 
 
-xgb_model <- xgb.train(p, test_xgb, ntrees, list(val = val_xgb), print_every_n = 10, early_stopping_rounds = 500)
+xgb_model <- xgb.train(p, train_xgb, ntrees, list(val = test_xgb), print_every_n = 10, early_stopping_rounds = 500)
 
 xgb.importance(model = xgb_model) %>% as_tibble() %>% top_n(25, Gain) %>%
   ggplot(aes(x = reorder(Feature, Gain), y = Gain)) +
@@ -370,7 +376,7 @@ our <- today_test %>%
   # filter(name %in% widemoat_2017)  %>% 
   arrange(desc(pred)) %>% 
   filter(pred > 0.5) %>% 
-  top_n(10, pred)
+  top_n(7, pred)
 
 
 
@@ -426,7 +432,7 @@ sp_portfolio <- get_hist_prices(tickers) %>%
   summarise(r = mean(price)) %>% 
   data.table()
   
-
+library(PerformanceAnalytics)
 our_portfolio %>% 
   rename(our = r) %>% 
   cbind(
