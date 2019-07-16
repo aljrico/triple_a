@@ -355,24 +355,53 @@ get_hist_prices <- function(tickers, from = "2016-01-01", to = '2019-04-01' ){
   
   return(all_prices)
 }
-build_porfolio <- function(portfolio, year_to_predict){
+build_porfolio <- function(portfolio, year_to_predict, n_portfolio = 35){
   
   weight_formula <- function(rank, n_portfolio = 35, weight_max = 0.06){
-    weights <- seq(from = 0.06, to = 0.01, length.out = n_portfolio )
+    
+    find_step <- function(weight_max = 0.06, n_portfolio = 35, n_ite = 1e3){
+      step_min <- 0
+      step_max <- 1
+      A <- weight_max
+      
+      step <- step_min
+      for(i in (1:n_ite)){
+        s <- seq(from = A, length.out = 35, by = -step)
+        res <- sum(s[s>0])
+        
+        if(res > 1){
+          step_min <- step
+          step <- (step + step_max) / 2
+        }else{
+          step_max <- step
+          step <- (step + step_min) / 2
+        }
+        if(res == 1) break
+      }
+      return(step)
+    }
+    
+    step <- find_step(weight_max = weight_max, n_portfolio = n_portfolio)
+    
+    weights <- seq(from = weight_max, length.out = n_portfolio, by = -step )
     return(weights[rank])
   }
   
   weight_list <- portfolio %>% 
     na.omit() %>% 
-    head(5) %>% 
     mutate(n = 1:n()) %>% 
-    mutate(weight = weight_formula(rank = n)) %>% 
+    mutate(weight = weight_formula(rank = n, n_portfolio = n_portfolio)) %>% 
     select(name, weight) %>% 
-    rename(firm = name)
+    rename(firm = name) %>% 
+    filter(weight > 0) %>% 
+    na.omit()
+  
+  length_portfolio <- nrow(weight_list)
   
   portfolio %>% 
     na.omit() %>% 
     filter(year == year_to_predict) %>% 
+    .[1:length_portfolio,] %>% 
     .$name %>% 
     get_hist_prices(
       from = paste0(year_to_predict, '-01-01'), 
@@ -390,7 +419,7 @@ build_porfolio <- function(portfolio, year_to_predict){
     return()
 }
 
-n_sample <- 15
+n_sample <- 35
 
 test_files <- sample_n(avaiable.names(), n_sample, replace = FALSE) %>% .$file
 
