@@ -13,6 +13,9 @@ library(lubridate)
 library(BatchGetSymbols)
 library(feather)
 
+source("get_financials.R")
+source("get_tickers.R")
+
 
 financial_path <- paste0(getwd(),"/data_far/data/")
 prices_path    <- paste0(getwd(),"/data_far/prices/")
@@ -124,10 +127,6 @@ ds.generator <- function(i_max=9999,names="null"){
   return(df)
 }
 
-#####################################################################################
-#####################################################################################
-
-
 ds.addBenchmarck <- function(df){
   
   df$date <- as_date(df$date)
@@ -223,206 +222,205 @@ fixFormat    <- function(df){
   
   
 }
-#TEST DATASETS  HERE#
-#####################
 
-avaiable.names() # List all avaiable names
+build_trte <- function(full_data, split_size = 0.7, year_to_predict){
+  
+  tickers <- full_data$name %>% unique()
+  
+  tr_tickers <- sample(tickers, floor(length(tickers)*split_size))
+  
+  
+  tr_te <- full_data %>% 
+    mutate(target = as.numeric(target) - 1) %>% 
+    mutate(target = ifelse(is.na(target), 0, target)) %>% 
+    rename(price = `Adj Close`) %>% 
+    mutate(date = ymd(date)) %>% 
+    mutate(Sector = as.numeric(as.factor(Sector))) %>% 
+    mutate(Industry = as.numeric(as.factor(Industry))) %>% 
+    select(-`full name`, -`interest_coverage`, -`High`, -`Close`, -`Low`, -`Open`) %>% 
+    mutate(target = as.numeric(target)) %>% 
+    data.table()
+  
+  train <- tr_te %>%
+    filter(year(ymd(date)) < year_to_predict - 1) %>%
+    filter(name %in% tr_tickers) %>%
+    select(-date, -name) %>%
+    data.table()
+  
+  test <- tr_te %>%
+    filter(year(date) %in% c(year_to_predict - 1)) %>%
+    filter(!(name %in% tr_tickers)) %>%
+    select(-date, -name) %>%
+    data.table()
+  
+  return(list(train = train, test = test))
+}
+train_model <- function(train, test){
+  source('tuning_xgb.R')
+  source('reduce_variables.R')
+  library(xgboost)
+  
+  y <- train$target
+  tri_val <- sample(seq_along(y), length(y)*0.1)
+  tr <- seq_along(y)[!(seq_along(y) %in% tri_val)]
+  y_test <- test$target
+  
+  tr_te <- bind_rows(train,test) 
+  train_xgb <- xgb.DMatrix(tr_te %>% select(-target) %>% .[tr,] %>%  as.matrix(), label = y[tr])
+  val_xgb <- xgb.DMatrix(tr_te %>% select(-target) %>% .[tri_val,] %>%  as.matrix(), label = y[tri_val])
+  test_xgb <- xgb.DMatrix((tr_te %>% .[-(c(tr,tri_val))] %>% select(-target) %>%  as.matrix()), label = y_test)
+  
+  ntrees <- 1e2
+  p <- list(objective = "binary:logistic",
+            booster = "gbtree",
+            eval_metric = "auc",
+            nthread = 4,
+            eta = 0.3,
+            max_depth = 6,
+            min_child_weight = 30,
+            gamma = 5,
+            subsample = 0.5,
+            colsample_bytree = 0.5,
+            colsample_bylevel = 0.632,
+            alpha = 0.01,
+            lambda = 0.01,
+            nrounds = 1e3)
+  
+  
+  xgb_model <- xgb.train(p, train_xgb, ntrees, list(val = test_xgb), print_every_n = 10, early_stopping_rounds = 500)
+  return(xgb_model)
+}
+predict_portfolio <- function(model, full_data, year_to_predict, n_firms = 20){
+  
+  days_to_predict <- paste0(year_to_predict, '-01-', c('01', '02', '03'))
+  
+  today_test <- full_data %>% 
+    mutate(target = as.numeric(target) - 1) %>% 
+    mutate(target = ifelse(is.na(target), 0, target)) %>% 
+    rename(price = `Adj Close`) %>% 
+    mutate(date = ymd(date)) %>% 
+    mutate(Sector = as.numeric(as.factor(Sector))) %>% 
+    mutate(Industry = as.numeric(as.factor(Industry))) %>% 
+    select(-`full name`, -`interest_coverage`, -`High`, -`Close`, -`Low`, -`Open`) %>% 
+    mutate(target = as.numeric(target)) %>% 
+    mutate(date = ymd(date)) %>% 
+    group_by() %>% 
+    filter(date %in% ymd(days_to_predict))
+  
+  today_xgb <- today_test %>% 
+    select(-target, -date, -name) %>% 
+    as.matrix() %>% 
+    xgb.DMatrix() 
+  
+  today_test$pred <- model %>% predict(today_xgb)
+  
+  all_recommendations <- today_test %>% 
+    select(name, pred) %>% 
+    group_by(name) %>% 
+    summarise(pred = mean(pred)) %>% 
+    arrange(desc(pred)) %>% 
+    top_n(n_firms, pred)
+  
+  return(all_recommendations)
+}
 
-#############################################################################
-# you can write down the names we have for testing and generate the dataset #
-#############################################################################
+get_hist_prices <- function(tickers, from = "2016-01-01", to = '2019-04-01' ){
+  stock_prices <- list()
+  # getSymbols(tickers, env = stock_prices, src = "yahoo", from = from, to = to, auto.assign = TRUE)
+  
+  all_prices <- tibble()
+  
+  for(k in 1:length(tickers)){
+    tryit <- try(
+      getSymbols(tickers[[k]], src = "yahoo", from = "1950-01-01", auto.assign = FALSE)
+    )
+    
+    if(inherits(tryit, "try-error")){
+      cat(paste0('... ', tickers[[k]], ' : Not found. Skipping ... \n'))
+      k <- k + 1
+    }else {
+      stock_prices[[tickers[[k]]]] <- getSymbols(tickers[[k]], src = "yahoo", from = from, to = to, auto.assign = FALSE)
+      raw_df <- stock_prices[[tickers[[k]]]][,6] %>% data.frame()
+      dates <- raw_df %>% row.names() %>% as.Date()
+      prices <- raw_df[,1]
+      
+      new_df <- data.frame(price = as.numeric(prices), date = dates) %>%
+        data.table()
+      
+      new_df$firm <- tickers[[k]]
+      
+      all_prices <- rbind(all_prices,new_df)
+    }
+  }
+  
+  return(all_prices)
+}
+build_porfolio <- function(portfolio, year_to_predict){
+  
+  weight_formula <- function(rank, n_portfolio = 35, weight_max = 0.06){
+    weights <- seq(from = 0.06, to = 0.01, length.out = n_portfolio )
+    return(weights[rank])
+  }
+  
+  weight_list <- portfolio %>% 
+    na.omit() %>% 
+    head(5) %>% 
+    mutate(n = 1:n()) %>% 
+    mutate(weight = weight_formula(rank = n)) %>% 
+    select(name, weight) %>% 
+    rename(firm = name)
+  
+  portfolio %>% 
+    na.omit() %>% 
+    filter(year == year_to_predict) %>% 
+    .$name %>% 
+    get_hist_prices(
+      from = paste0(year_to_predict, '-01-01'), 
+      to = paste0(year_to_predict + 1, '-01-01')
+    ) %>% 
+    group_by(firm) %>% 
+    mutate(r = (price - lag(price)) / price) %>% 
+    left_join(
+      weight_list
+    ) %>% 
+    group_by(date) %>% 
+    summarise(r = sum(r*weight)) %>% 
+    as_tibble() %>% 
+    na.omit() %>% 
+    return()
+}
 
-#test_files <- c("AMZN.feather","AAPL.feather","MSFT.feather","FB.feather","DISCA.feather") 
+n_sample <- 15
 
-n_sample <- 50
-
-library(tictoc)
-tic()
 test_files <- sample_n(avaiable.names(), n_sample, replace = FALSE) %>% .$file
 
 all_tickers <- avaiable.names() %>% .$files %>% str_remove_all('.feather')
 test_files <- paste0(all_tickers[all_tickers %in% getTickers('sp500')], '.feather') %>% sample(n_sample)
 ds         <- ds.generator(n_sample, test_files)
 ds         <- fixFormat(ds)
-toc()
 
 
+years <- c(2015, 2016, 2017, 2018, 2019)
 
+portfolio <- tibble(name = NA, pred = NA, year = NA)
+our_portfolio <- tibble(date = NA, r = NA)
 
-# RF ----------------------------------------------------------------------
-
-tickers <- test_files
-split_size <- (tickers %>% length()) * 0.8
-
-tr_tickers <- sample(tickers, split_size %>% floor()) %>% str_remove_all('.feather')
-
-
-tr_te <- ds %>% 
-  mutate(target = as.numeric(target) - 1) %>% 
-  mutate(target = ifelse(is.na(target), 0, target)) %>% 
-  rename(price = `Adj Close`) %>% 
-  mutate(date = ymd(date)) %>% 
-  mutate(Sector = as.numeric(as.factor(Sector))) %>% 
-  mutate(Industry = as.numeric(as.factor(Industry))) %>% 
-  select(-`full name`, -`interest_coverage`, -`High`, -`Close`, -`Low`, -`Open`) %>% 
-  mutate(target = as.numeric(target)) %>% 
-  data.table()
-
-train <- tr_te %>%
-  filter(year(ymd(date)) < 2015) %>%
-  filter(name %in% tr_tickers) %>%
-  select(-date, -name) %>%
-  data.table()
-
-test <- tr_te %>%
-  filter(year(date) %in% c(2015)) %>%
-  filter(!(name %in% tr_tickers)) %>%
-  select(-date, -name) %>%
-  data.table()
-
-
-
-
-# ML ----------------------------------------------------------------------
-source('tuning_xgb.R')
-source('reduce_variables.R')
-library(xgboost)
-
-y <- train$target
-tri_val <- sample(seq_along(y), length(y)*0.1)
-tr <- seq_along(y)[!(seq_along(y) %in% tri_val)]
-y_test <- test$target
-
-tr_te <- bind_rows(train,test) 
-train_xgb <- xgb.DMatrix(tr_te %>% select(-target) %>% .[tr,] %>%  as.matrix(), label = y[tr])
-val_xgb <- xgb.DMatrix(tr_te %>% select(-target) %>% .[tri_val,] %>%  as.matrix(), label = y[tri_val])
-test_xgb <- xgb.DMatrix((tr_te %>% .[-(c(tr,tri_val))] %>% select(-target) %>%  as.matrix()), label = y_test)
-
-# tuning_scores <- train %>% sample_n(1e4) %>% tune_xgb(target_label = 'target', eval_metric = 'auc', fast = TRUE)
-# 
-# m <- which.max(tuning_scores$scores)
-# currentSubsampleRate <- tuning_scores[["subsample"]][[m]]
-# currentColsampleRate <- tuning_scores[["colsample_bytree"]][[m]]
-# lr <- tuning_scores[["lr"]][[m]]
-# mtd <- tuning_scores[["mtd"]][[m]]
-# mcw <- tuning_scores[["mcw"]][[m]]
-
-ntrees <- 1e3
-p <- list(objective = "binary:logistic",
-          booster = "gbtree",
-          eval_metric = "auc",
-          nthread = 4,
-          eta = 0.3,
-          max_depth = 6,
-          min_child_weight = 30,
-          gamma = 5,
-          subsample = 0.5,
-          colsample_bytree = 0.5,
-          colsample_bylevel = 0.632,
-          alpha = 0.01,
-          lambda = 0.01,
-          nrounds = 1e3)
-
-
-xgb_model <- xgb.train(p, train_xgb, ntrees, list(val = test_xgb), print_every_n = 10, early_stopping_rounds = 500)
-
-xgb.importance(model = xgb_model) %>% as_tibble() %>% top_n(25, Gain) %>%
-  ggplot(aes(x = reorder(Feature, Gain), y = Gain)) +
-  geom_col() +
-  coord_flip() +
-  xlab('') +
-  ylab('')
-
-prediction <- xgb_model %>% predict(test_xgb)
-err <- mean(as.numeric(prediction > 0.5) != test$target)
-print(paste("test-error=", err))
-
-
-
-
-# Predict -----------------------------------------------------------------
-
-today_test <- ds %>% 
-  mutate(target = as.numeric(target) - 1) %>% 
-  mutate(target = ifelse(is.na(target), 0, target)) %>% 
-  rename(price = `Adj Close`) %>% 
-  mutate(date = ymd(date)) %>% 
-  mutate(Sector = as.numeric(as.factor(Sector))) %>% 
-  mutate(Industry = as.numeric(as.factor(Industry))) %>% 
-  select(-`full name`, -`interest_coverage`, -`High`, -`Close`, -`Low`, -`Open`) %>% 
-  mutate(target = as.numeric(target)) %>% 
-  mutate(date = ymd(date)) %>% 
-  group_by() %>% 
-  filter(date == ymd('2016-01-01') | date == ymd('2016-01-02') | date == ymd('2016-01-03'))
-
-today_xgb <- today_test %>% 
-  select(-target, -date, -name) %>% 
-  as.matrix() %>% 
-  xgb.DMatrix() 
-
-today_test$pred <- xgb_model %>% predict(today_xgb)
-
-all_recommendations <- today_test %>% 
-  select(name, pred) %>% 
-  group_by(name) %>% 
-  summarise(pred = mean(pred)) %>% 
-  arrange(desc(pred)) %>% 
-  top_n(40, pred)
-
-our <- today_test %>% 
-  select(name, pred) %>% 
-  group_by(name) %>% 
-  summarise(pred = mean(pred)) %>% 
-  # filter(name %in% widemoat_2017)  %>% 
-  arrange(desc(pred)) %>% 
-  filter(pred > 0.5) %>% 
-  top_n(7, pred)
-
-
-
-# Performance -------------------------------------------------------------
-
-
-get_hist_prices <- function(tickers, from = "2016-01-01", to = '2019-04-01' ){
-  stock_prices <- new.env()
-  getSymbols(tickers, env = stock_prices, src = "yahoo", from = from, to = to, auto.assign = TRUE)
+for(i in seq_along(years)){
+  tr_te <- build_trte(full_data = ds, split_size = 0.7, year_to_predict = years[[i]])
+  xgb_model <- train_model(tr_te$train, tr_te$test)
   
-  all_prices <- tibble()
+  portfolio <- rbind(
+    portfolio, 
+    predict_portfolio(model = xgb_model, full_data = ds, year_to_predict = years[[i]], n_firms = 35) %>% 
+      mutate(year = years[[i]])
+    ) 
   
-  for(i in 1:length(tickers)){
-    raw_df <- stock_prices[[tickers[[i]]]][,6] %>% data.frame()
-    dates <- raw_df %>% row.names() %>% as.Date()
-    prices <- raw_df[,1]
-    
-    new_df <- data.frame(price = as.numeric(prices), date = dates) %>%
-      data.table()
-    
-    new_df$firm <- tickers[[i]]
-    
-    all_prices <- rbind(all_prices,new_df)
-  }
-  
-  return(all_prices)
+  our_portfolio <- 
+    rbind(
+      our_portfolio,
+      build_porfolio(portfolio, year_to_predict = years[[i]])
+    )
 }
-
-
-our_portfolio <- get_hist_prices(our$name) %>% 
-  group_by(firm) %>% 
-  mutate(price = (price - lag(price)) / price) %>% 
-  group_by(date) %>% 
-  summarise(r = mean(price)) %>% 
-  data.table()
-
-
-tickers <- widemoat_2017[!(widemoat_2017 %in% c('CBG', 'BRK.B', 'ESRX', 'MON', 'VF', 'MJN', 'JLL'))]
-
-wm_portfolio <- get_hist_prices(tickers) %>% 
-  group_by(firm) %>% 
-  mutate(price = (price - lag(price)) / price) %>% 
-  group_by(date) %>% 
-  summarise(r = mean(price)) %>% 
-  data.table()
-
 
 tickers <- 'SPY'
 sp_portfolio <- get_hist_prices(tickers) %>% 
@@ -431,20 +429,15 @@ sp_portfolio <- get_hist_prices(tickers) %>%
   group_by(date) %>% 
   summarise(r = mean(price)) %>% 
   data.table()
-  
+
 library(PerformanceAnalytics)
 our_portfolio %>% 
+  na.omit() %>% 
   rename(our = r) %>% 
-  cbind(
-    wm_portfolio %>% 
-      rename(wm = r)
-  ) %>%
   cbind(
     sp_portfolio %>% 
       rename(sp = r)
   ) %>% 
   .[, -1] %>% 
-  .[, -2] %>% 
-  select(date, wm, our, sp) %>% 
+  select(date, our, sp) %>% 
   charts.PerformanceSummary()
-  

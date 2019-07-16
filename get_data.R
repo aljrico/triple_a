@@ -13,7 +13,7 @@ source("get_tickers.R")
 
 # Retrieve Data -----------------------------------------------------------
 
-tickers <- getTickers(index = "sp500")
+tickers <- getTickers(index = "sp500") %>% sample(10)
 tickers <- tickers 
 fins <- getFinancials(tickers)
 
@@ -22,6 +22,8 @@ fins <- getFinancials(tickers)
 
 # Prices
 stock_prices <- new.env()
+lol <- list()
+
 getSymbols(tickers, env = stock_prices, src = "yahoo", from = "1950-01-01", auto.assign = TRUE)
 
 all_prices <- tibble()
