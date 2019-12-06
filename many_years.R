@@ -270,15 +270,15 @@ train_model <- function(train, test){
   val_xgb <- xgb.DMatrix(tr_te %>% select(-target) %>% .[tri_val,] %>%  as.matrix(), label = y[tri_val])
   test_xgb <- xgb.DMatrix((tr_te %>% .[-(c(tr,tri_val))] %>% select(-target) %>%  as.matrix()), label = y_test)
   
-  ntrees <- 1e2
+  ntrees <- 1e3
   p <- list(objective = "binary:logistic",
             booster = "gbtree",
             eval_metric = "auc",
             nthread = 4,
-            eta = 0.3,
+            eta = 0.03,
             max_depth = 6,
             min_child_weight = 30,
-            gamma = 5,
+            gamma = 0,
             subsample = 0.5,
             colsample_bytree = 0.5,
             colsample_bylevel = 0.632,
@@ -324,7 +324,7 @@ predict_portfolio <- function(model, full_data, year_to_predict, n_firms = 20){
   return(all_recommendations)
 }
 
-get_hist_prices <- function(tickers, from = "2016-01-01", to = '2019-04-01' ){
+get_hist_prices <- function(tickers, from = "2015-01-01", to){
   stock_prices <- list()
   # getSymbols(tickers, env = stock_prices, src = "yahoo", from = from, to = to, auto.assign = TRUE)
   
@@ -337,7 +337,7 @@ get_hist_prices <- function(tickers, from = "2016-01-01", to = '2019-04-01' ){
     
     if(inherits(tryit, "try-error")){
       cat(paste0('... ', tickers[[k]], ' : Not found. Skipping ... \n'))
-      k <- k + 1
+      next
     }else {
       stock_prices[[tickers[[k]]]] <- getSymbols(tickers[[k]], src = "yahoo", from = from, to = to, auto.assign = FALSE)
       raw_df <- stock_prices[[tickers[[k]]]][,6] %>% data.frame()
@@ -355,18 +355,18 @@ get_hist_prices <- function(tickers, from = "2016-01-01", to = '2019-04-01' ){
   
   return(all_prices)
 }
-build_porfolio <- function(portfolio, year_to_predict, n_portfolio = 35){
+build_porfolio <- function(portfolio, year_to_predict, n_portfolio){
   
-  weight_formula <- function(rank, n_portfolio = 35, weight_max = 0.06){
+  weight_formula <- function(rank, n_portfolio, weight_max = 0.1){
     
-    find_step <- function(weight_max = 0.06, n_portfolio = 35, n_ite = 1e3){
+    find_step <- function(weight_max = 0.1, n_portfolio, n_ite = 1e3){
       step_min <- 0
       step_max <- 1
       A <- weight_max
       
       step <- step_min
       for(i in (1:n_ite)){
-        s <- seq(from = A, length.out = 35, by = -step)
+        s <- seq(from = A, length.out = n_portfolio, by = -step)
         res <- sum(s[s>0])
         
         if(res > 1){
@@ -390,6 +390,7 @@ build_porfolio <- function(portfolio, year_to_predict, n_portfolio = 35){
   weight_list <- portfolio %>% 
     na.omit() %>% 
     mutate(n = 1:n()) %>% 
+    filter(n <= n_portfolio) %>% 
     mutate(weight = weight_formula(rank = n, n_portfolio = n_portfolio)) %>% 
     select(name, weight) %>% 
     rename(firm = name) %>% 
@@ -402,6 +403,7 @@ build_porfolio <- function(portfolio, year_to_predict, n_portfolio = 35){
     na.omit() %>% 
     filter(year == year_to_predict) %>% 
     .[1:length_portfolio,] %>% 
+    na.omit() %>% 
     .$name %>% 
     get_hist_prices(
       from = paste0(year_to_predict, '-01-01'), 
@@ -413,13 +415,18 @@ build_porfolio <- function(portfolio, year_to_predict, n_portfolio = 35){
       weight_list
     ) %>% 
     group_by(date) %>% 
-    summarise(r = sum(r*weight)) %>% 
+    summarise(
+      r_w = sum(r*weight, na.rm = TRUE),
+      r_avg = mean(r, na.rm = TRUE)
+      ) %>% 
+    rename(r = r_w) %>% 
+    select(date, r) %>% 
     as_tibble() %>% 
     na.omit() %>% 
     return()
 }
 
-n_sample <- 35
+n_sample <- 485
 
 test_files <- sample_n(avaiable.names(), n_sample, replace = FALSE) %>% .$file
 
@@ -433,40 +440,64 @@ years <- c(2015, 2016, 2017, 2018, 2019)
 
 portfolio <- tibble(name = NA, pred = NA, year = NA)
 our_portfolio <- tibble(date = NA, r = NA)
+fund_max_size <- 35
 
 for(i in seq_along(years)){
   tr_te <- build_trte(full_data = ds, split_size = 0.7, year_to_predict = years[[i]])
   xgb_model <- train_model(tr_te$train, tr_te$test)
-  
+
   portfolio <- rbind(
     portfolio, 
-    predict_portfolio(model = xgb_model, full_data = ds, year_to_predict = years[[i]], n_firms = 35) %>% 
+    predict_portfolio(model = xgb_model, full_data = ds, year_to_predict = years[[i]], n_firms = fund_max_size) %>% 
       mutate(year = years[[i]])
-    ) 
+    ) %>% 
+    na.omit()
   
   our_portfolio <- 
     rbind(
       our_portfolio,
-      build_porfolio(portfolio, year_to_predict = years[[i]])
+      build_porfolio(portfolio, year_to_predict = years[[i]], n_portfolio = fund_max_size)
     )
 }
 
 tickers <- 'SPY'
-sp_portfolio <- get_hist_prices(tickers) %>% 
+sp_portfolio <- get_hist_prices(tickers, to = '2019-07-01') %>% 
   group_by(firm) %>% 
   mutate(price = (price - lag(price)) / price) %>% 
   group_by(date) %>% 
   summarise(r = mean(price)) %>% 
   data.table()
 
-library(PerformanceAnalytics)
+
+compute_performance <- function(y){
+  current_capital <- 100
+  hist_capital <- c()
+  for(i in seq_along(y)){
+    hist_capital[[i]] <- current_capital
+    previous_capital <- current_capital
+    current_capital <- previous_capital * (1 + y[[i]])
+  }
+  return(hist_capital)
+}
+
 our_portfolio %>% 
   na.omit() %>% 
   rename(our = r) %>% 
-  cbind(
-    sp_portfolio %>% 
-      rename(sp = r)
-  ) %>% 
-  .[, -1] %>% 
+  mutate(date = as.Date(date)) %>% 
+  left_join(
+    sp_portfolio %>%
+      rename(sp = r) %>%
+      mutate(date = as.Date(date)) %>%
+      as_tibble() %>% 
+      na.omit()
+    ) %>% 
   select(date, our, sp) %>% 
-  charts.PerformanceSummary()
+  mutate(our = ifelse(is.na(our), 0, our)) %>% 
+  mutate(sp = ifelse(is.na(sp), 0, sp)) %>% 
+  mutate(our_ret = our %>% compute_performance(),
+         sp_ret = sp %>% compute_performance()) %>% 
+  select(-our, -sp) %>% 
+  melt(id.vars = c('date')) %>% 
+  ggplot(aes(x = date, y = value, colour = variable)) +
+  geom_line()
+  
