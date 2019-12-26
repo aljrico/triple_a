@@ -426,7 +426,7 @@ build_porfolio <- function(portfolio, year_to_predict, n_portfolio){
     return()
 }
 
-n_sample <- 485
+n_sample <- 400
 
 test_files <- sample_n(avaiable.names(), n_sample, replace = FALSE) %>% .$file
 
@@ -434,6 +434,18 @@ all_tickers <- avaiable.names() %>% .$files %>% str_remove_all('.feather')
 test_files <- paste0(all_tickers[all_tickers %in% getTickers('sp500')], '.feather') %>% sample(n_sample)
 ds         <- ds.generator(n_sample, test_files)
 ds         <- fixFormat(ds)
+
+tic()
+ds <- ds.generator(n_sample, test_files)
+toc()
+
+tic()
+extended_ds <- ds_generator(test_files, extend_time = TRUE)
+toc()
+
+tic()
+compressed_ds <- ds_generator(paste0(all_tickers, '.feather'), extend_time = FALSE)
+toc()
 
 
 years <- c(2015, 2016, 2017, 2018, 2019)
