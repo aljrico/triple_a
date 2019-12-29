@@ -444,7 +444,7 @@ extended_ds <- ds_generator(test_files, extend_time = TRUE)
 toc()
 
 tic()
-compressed_ds <- ds_generator(paste0(all_tickers, '.feather'), extend_time = FALSE)
+compressed_ds <- ds_generator(test_files, extend_time = FALSE)
 toc()
 
 

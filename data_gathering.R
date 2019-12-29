@@ -114,3 +114,12 @@ ds_generator <- function(firm_names, extend_time = TRUE){
     add_sp500(prices_path = prices_path)
   return(complete_data)
 }
+
+
+available_companies <- function() {
+  
+  financial_files <- dir("data_far/data",pattern=".feather")
+  price_files     <- dir("data_far/prices",pattern=".feather")
+  intersect(financial_files,price_files) %>% 
+    str_remove_all('.feather')
+}
